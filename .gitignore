@@ -1,0 +1,5 @@
+# Exclude the sts_tooth_data folder
+sts_tooth_data/
+
+# Exclude all PNG files
+*.png
