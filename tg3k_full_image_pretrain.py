@@ -157,12 +157,12 @@ def build_fullimage_pretrain_transform(height: int, width: int) -> A.Compose:
                 border_mode=cv2.BORDER_REFLECT_101,
                 p=0.5,
             ),
-            A.RandomBrightnessContrast(
-                brightness_limit=0.1,
-                contrast_limit=0.1,
-                p=0.3,
-            ),
-            A.GaussianBlur(blur_limit=(3, 5), p=0.2),
+            # A.RandomBrightnessContrast(
+            #     brightness_limit=0.1,
+            #     contrast_limit=0.1,
+            #     p=0.3,
+            # ),
+            # A.GaussianBlur(blur_limit=(3, 5), p=0.2),
             A.Normalize(mean=(0.5,), std=(0.25,)),
             ToTensorV2(),
         ]
@@ -472,9 +472,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--images-dir", type=str, required=True,
                         help="Directory containing TG3K ultrasound images (PNG/JPG).")
-    parser.add_argument("--checkpoint-dir", type=str, default="./checkpoints_fullimage",
+    parser.add_argument("--checkpoint-dir", type=str, default="./tg3k/checkpoints_fullimage",
                         help="Where to save checkpoints.")
-    parser.add_argument("--log-dir", type=str, default="./runs/fullimage_tg3k",
+    parser.add_argument("--log-dir", type=str, default="./tg3k/runs/fullimage_tg3k",
                         help="TensorBoard log directory.")
 
     parser.add_argument("--img-height", type=int, default=224,
@@ -515,3 +515,4 @@ def parse_args() -> argparse.Namespace:
 if __name__ == "__main__":
     args = parse_args()
     train_fullimage(args)
+# python tg3k_MIM_Pretrain.py --images-dir ./tg3k/tg3k/thyroid-image
