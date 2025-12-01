@@ -3,3 +3,6 @@ sts_tooth_data/
 
 # Exclude all PNG files
 *.png
+
+# Exclude the tg3k folder
+tg3k/
