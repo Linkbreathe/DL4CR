@@ -1446,3 +1446,9 @@ def parse_args():
 if __name__ == "__main__":
     args = parse_args()
     main(args)
+
+# pretrain
+# python tg3k_eval.py --images-dir ./tg3k/tg3k/thyroid-image --masks-dir ./tg3k/tg3k/thyroid-mask --split-json ./tg3k/tg3k/tg3k-trainval.json --checkpoint ./tg3k/checkpoints_mim/mim_best.pth --split test --top-k 5
+
+# finetune
+# python tg3k_eval.py --images-dir ./tg3k/tg3k/thyroid-image --masks-dir ./tg3k/tg3k/thyroid-mask --split-json ./tg3k/tg3k/tg3k-trainval.json --checkpoint ./tg3k/checkpoints_finetune/mim1443/best_model.pth --split test --top-k 5
