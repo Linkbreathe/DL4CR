@@ -8,13 +8,16 @@ from PIL import Image
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+import torch.nn.functional as F  # 目前没用到，但保留也没关系
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
 import albumentations as A
 from albumentations.pytorch.transforms import ToTensorV2
 import cv2
+
+# 使用与 MIM 相同的模型定义
+from models import UNet2D, UNet2D_scAG, UNet2D_NAC
 
 
 # -----------------------------
@@ -26,119 +29,6 @@ def set_seed(seed: int = 42) -> None:
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-
-
-# -----------------------------
-# Model: 2D U-Net (same as MIM)
-# -----------------------------
-class DoubleConv(nn.Module):
-    """(Conv2d -> BN -> ReLU) * 2"""
-
-    def __init__(self, in_channels: int, out_channels: int, mid_channels: Optional[int] = None):
-        super().__init__()
-        if mid_channels is None:
-            mid_channels = out_channels
-        self.double_conv = nn.Sequential(
-            nn.Conv2d(in_channels, mid_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(mid_channels),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(mid_channels, out_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.double_conv(x)
-
-
-class Down(nn.Module):
-    """Downscaling with maxpool then DoubleConv."""
-
-    def __init__(self, in_channels: int, out_channels: int):
-        super().__init__()
-        self.maxpool_conv = nn.Sequential(
-            nn.MaxPool2d(kernel_size=2, stride=2),
-            DoubleConv(in_channels, out_channels),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.maxpool_conv(x)
-
-
-class Up(nn.Module):
-    """Upscaling then DoubleConv."""
-
-    def __init__(self, in_channels: int, out_channels: int, bilinear: bool = True):
-        super().__init__()
-
-        if bilinear:
-            self.up = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=True)
-            self.conv = DoubleConv(in_channels, out_channels, in_channels // 2)
-        else:
-            self.up = nn.ConvTranspose2d(in_channels, in_channels // 2, kernel_size=2, stride=2)
-            self.conv = DoubleConv(in_channels, out_channels)
-
-    def forward(self, x1: torch.Tensor, x2: torch.Tensor) -> torch.Tensor:
-        x1 = self.up(x1)
-
-        diff_y = x2.size()[2] - x1.size()[2]
-        diff_x = x2.size()[3] - x1.size()[3]
-        x1 = F.pad(
-            x1,
-            [diff_x // 2, diff_x - diff_x // 2,
-             diff_y // 2, diff_y - diff_y // 2],
-        )
-
-        x = torch.cat([x2, x1], dim=1)
-        return self.conv(x)
-
-
-class OutConv(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int):
-        super().__init__()
-        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=1)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.conv(x)
-
-
-class UNet2D(nn.Module):
-    """Standard 2D U-Net for grayscale reconstruction."""
-
-    def __init__(self, in_channels: int = 1, out_channels: int = 1,
-                 base_channels: int = 32, bilinear: bool = True):
-        super().__init__()
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        self.base_channels = base_channels
-        self.bilinear = bilinear
-
-        self.inc = DoubleConv(in_channels, base_channels)
-        self.down1 = Down(base_channels, base_channels * 2)
-        self.down2 = Down(base_channels * 2, base_channels * 4)
-        self.down3 = Down(base_channels * 4, base_channels * 8)
-        factor = 2 if bilinear else 1
-        self.down4 = Down(base_channels * 8, base_channels * 16 // factor)
-
-        self.up1 = Up(base_channels * 16, base_channels * 8 // factor, bilinear)
-        self.up2 = Up(base_channels * 8, base_channels * 4 // factor, bilinear)
-        self.up3 = Up(base_channels * 4, base_channels * 2 // factor, bilinear)
-        self.up4 = Up(base_channels * 2, base_channels, bilinear)
-        self.outc = OutConv(base_channels, out_channels)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x1 = self.inc(x)
-        x2 = self.down1(x1)
-        x3 = self.down2(x2)
-        x4 = self.down3(x3)
-        x5 = self.down4(x4)
-
-        x = self.up1(x5, x4)
-        x = self.up2(x, x3)
-        x = self.up3(x, x2)
-        x = self.up4(x, x1)
-        logits = self.outc(x)
-        return logits
 
 
 # -----------------------------
@@ -184,7 +74,10 @@ def generate_block_mask(
     min_block_size: int = 32,
     max_block_size: int = 96,
 ) -> np.ndarray:
-    """Generate a random block-wise mask."""
+    """Generate a random block-wise mask.
+
+    1 表示被 mask 的区域，0 表示可见。
+    """
     mask = np.zeros((height, width), dtype=np.float32)
     target_area = height * width * mask_ratio
     current_area = 0.0
@@ -233,7 +126,7 @@ class TG3KFullImagePretrainDataset(Dataset):
     def __getitem__(self, idx: int):
         img_path = self.image_paths[idx]
         img_np = load_grayscale_image(img_path)
-        img_hwc = np.expand_dims(img_np, axis=-1)
+        img_hwc = np.expand_dims(img_np, axis=-1)  # (H, W, 1)
 
         augmented = self.transform(image=img_hwc)
         img_tensor = augmented["image"].float()  # (1, H, W)
@@ -367,7 +260,18 @@ def train_fullimage(args: argparse.Namespace) -> None:
         pin_memory=(device.type == "cuda"),
     )
 
-    model = UNet2D(
+    # 选择模型结构：unet / scag / nac
+    if args.model_type == "nac":
+        print("Using UNet2D_NAC (NAC + scAG) for full-image pretraining...")
+        ModelClass = UNet2D_NAC
+    elif args.model_type == "scag":
+        print("Using UNet2D_scAG (scAG) for full-image pretraining...")
+        ModelClass = UNet2D_scAG
+    else:
+        print("Using standard UNet2D for full-image pretraining...")
+        ModelClass = UNet2D
+
+    model = ModelClass(
         in_channels=1,
         out_channels=1,
         base_channels=args.base_channels,
@@ -385,7 +289,7 @@ def train_fullimage(args: argparse.Namespace) -> None:
 
     start_epoch = 0
 
-    # Optional: initialize from a previous MIM checkpoint
+    # 可选：从之前的 MIM checkpoint 初始化（建议 model_type 一致）
     if args.init_from is not None:
         init_path = Path(args.init_from).expanduser().resolve()
         if init_path.is_file():
@@ -397,7 +301,7 @@ def train_fullimage(args: argparse.Namespace) -> None:
         else:
             print(f"WARNING: init_from checkpoint {init_path} does not exist, skipping initialization.")
 
-    # Optional: resume training from a full-image checkpoint
+    # 可选：从 full-image checkpoint 继续训练
     if args.resume is not None:
         resume_path = Path(args.resume).expanduser().resolve()
         if resume_path.is_file():
@@ -415,6 +319,7 @@ def train_fullimage(args: argparse.Namespace) -> None:
     best_loss = float("inf")
 
     model.train()
+    print("Starting full-image pretraining...")
     for epoch in range(start_epoch, args.epochs):
         running_loss = 0.0
         num_batches = 0
@@ -477,13 +382,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log-dir", type=str, default="./tg3k/runs/fullimage_tg3k",
                         help="TensorBoard log directory.")
 
+    parser.add_argument("--model-type", type=str, default="unet",
+                        choices=["unet", "scag", "nac"],
+                        help="Model architecture: unet, scag, or nac.")
+
     parser.add_argument("--img-height", type=int, default=224,
                         help="Resize height for input images.")
     parser.add_argument("--img-width", type=int, default=320,
                         help="Resize width for input images.")
 
     parser.add_argument("--batch-size", type=int, default=4, help="Batch size for training.")
-    parser.add_argument("--epochs", type=int, default=50, help="Number of training epochs.")
+    parser.add_argument("--epochs", type=int, default=1, help="Number of training epochs.")
     parser.add_argument("--num-workers", type=int, default=0, help="Number of DataLoader workers.")
     parser.add_argument("--lr", type=float, default=1e-5, help="Learning rate.")
     parser.add_argument("--weight-decay", type=float, default=1e-5, help="Weight decay.")
@@ -515,4 +424,10 @@ def parse_args() -> argparse.Namespace:
 if __name__ == "__main__":
     args = parse_args()
     train_fullimage(args)
-# python tg3k_MIM_Pretrain.py --images-dir ./tg3k/tg3k/thyroid-image
+
+
+# scag
+# python tg3k_full_image_Pretrain.py --images-dir ./tg3k/tg3k/thyroid-image --checkpoint-dir ./tg3k/checkpoints_scag_fullimage --log-dir ./tg3k/runs/fullimage_tg3k_scag --model-type scag
+
+# nac
+# python tg3k_full_image_Pretrain.py --images-dir ./tg3k/tg3k/thyroid-image --checkpoint-dir ./tg3k/checkpoints_nac_fullimage --log-dir ./tg3k/runs/fullimage_tg3k_nac --model-type nac

@@ -17,6 +17,8 @@ from albumentations.pytorch.transforms import ToTensorV2
 import cv2
 import matplotlib.pyplot as plt
 
+from models import UNet2D, UNet2D_scAG, UNet2D_NAC
+
 
 # -----------------------------
 # Utility helpers
@@ -27,129 +29,6 @@ def set_seed(seed: int = 42) -> None:
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-
-
-# -----------------------------
-# Model: 2D U-Net (grayscale in/out)
-# -----------------------------
-class DoubleConv(nn.Module):
-    """(Conv2d -> BN -> ReLU) * 2"""
-
-    def __init__(self, in_channels: int, out_channels: int, mid_channels: Optional[int] = None):
-        super().__init__()
-        if mid_channels is None:
-            mid_channels = out_channels
-        self.double_conv = nn.Sequential(
-            nn.Conv2d(in_channels, mid_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(mid_channels),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(mid_channels, out_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.double_conv(x)
-
-
-class Down(nn.Module):
-    """Downscaling with maxpool then DoubleConv."""
-
-    def __init__(self, in_channels: int, out_channels: int):
-        super().__init__()
-        self.maxpool_conv = nn.Sequential(
-            nn.MaxPool2d(kernel_size=2, stride=2),
-            DoubleConv(in_channels, out_channels),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.maxpool_conv(x)
-
-
-class Up(nn.Module):
-    """Upscaling then DoubleConv.
-
-    If `bilinear=True`, use bilinear upsampling.
-    Otherwise, use ConvTranspose2d.
-    """
-
-    def __init__(self, in_channels: int, out_channels: int, bilinear: bool = True):
-        super().__init__()
-
-        if bilinear:
-            self.up = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=True)
-            self.conv = DoubleConv(in_channels, out_channels, in_channels // 2)
-        else:
-            self.up = nn.ConvTranspose2d(in_channels, in_channels // 2, kernel_size=2, stride=2)
-            self.conv = DoubleConv(in_channels, out_channels)
-
-    def forward(self, x1: torch.Tensor, x2: torch.Tensor) -> torch.Tensor:
-        x1 = self.up(x1)
-
-        # Pad if needed (in case of odd dimensions)
-        diff_y = x2.size()[2] - x1.size()[2]
-        diff_x = x2.size()[3] - x1.size()[3]
-        x1 = F.pad(
-            x1,
-            [diff_x // 2, diff_x - diff_x // 2,
-             diff_y // 2, diff_y - diff_y // 2],
-        )
-
-        x = torch.cat([x2, x1], dim=1)
-        return self.conv(x)
-
-
-class OutConv(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int):
-        super().__init__()
-        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=1)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.conv(x)
-
-
-class UNet2D(nn.Module):
-    """Standard 2D U-Net.
-
-    Here we use:
-        - in_channels = 1  (grayscale ultrasound)
-        - out_channels = 1 (reconstruction of grayscale image)
-    """
-
-    def __init__(self, in_channels: int = 1, out_channels: int = 1,
-                 base_channels: int = 32, bilinear: bool = True):
-        super().__init__()
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        self.base_channels = base_channels
-        self.bilinear = bilinear
-
-        self.inc = DoubleConv(in_channels, base_channels)
-        self.down1 = Down(base_channels, base_channels * 2)
-        self.down2 = Down(base_channels * 2, base_channels * 4)
-        self.down3 = Down(base_channels * 4, base_channels * 8)
-        factor = 2 if bilinear else 1
-        self.down4 = Down(base_channels * 8, base_channels * 16 // factor)
-
-        self.up1 = Up(base_channels * 16, base_channels * 8 // factor, bilinear)
-        self.up2 = Up(base_channels * 8, base_channels * 4 // factor, bilinear)
-        self.up3 = Up(base_channels * 4, base_channels * 2 // factor, bilinear)
-        self.up4 = Up(base_channels * 2, base_channels, bilinear)
-        self.outc = OutConv(base_channels, out_channels)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x1 = self.inc(x)
-        x2 = self.down1(x1)
-        x3 = self.down2(x2)
-        x4 = self.down3(x3)
-        x5 = self.down4(x4)
-
-        x = self.up1(x5, x4)
-        x = self.up2(x, x3)
-        x = self.up3(x, x2)
-        x = self.up4(x, x1)
-        logits = self.outc(x)
-        return logits
 
 
 # -----------------------------
@@ -189,11 +68,11 @@ def load_grayscale_image(path: Path) -> np.ndarray:
 
 
 def generate_block_mask(
-        height: int,
-        width: int,
-        mask_ratio: float = 0.4,
-        min_block_size: int = 32,
-        max_block_size: int = 96,
+    height: int,
+    width: int,
+    mask_ratio: float = 0.4,
+    min_block_size: int = 32,
+    max_block_size: int = 96,
 ) -> np.ndarray:
     """Generate a random block-wise mask.
 
@@ -234,12 +113,12 @@ class TG3KMIMDataset(Dataset):
     """
 
     def __init__(
-            self,
-            image_paths: List[Path],
-            transform: A.Compose,
-            mask_ratio: float = 0.4,
-            min_block_size: int = 32,
-            max_block_size: int = 96,
+        self,
+        image_paths: List[Path],
+        transform: A.Compose,
+        mask_ratio: float = 0.4,
+        min_block_size: int = 32,
+        max_block_size: int = 96,
     ):
         self.image_paths = list(sorted(image_paths))
         self.transform = transform
@@ -286,7 +165,7 @@ class TG3KMIMDataset(Dataset):
 # Loss
 # -----------------------------
 def masked_l1_loss(
-        pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor, eps: float = 1e-8
+    pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor, eps: float = 1e-8
 ) -> torch.Tensor:
     """L1 reconstruction loss computed only over masked pixels."""
     if pred.shape != target.shape or pred.shape != mask.shape:
@@ -322,7 +201,7 @@ def visualize_samples(dataset: Dataset, num_samples: int = 3):
         # Assuming mean=0.5, std=0.25 based on transforms
         mean, std = 0.5, 0.25
 
-        def denormalize(t):
+        def denormalize(t: torch.Tensor) -> np.ndarray:
             return (t.squeeze().numpy() * std + mean).clip(0, 1)
 
         target_np = denormalize(target_img)
@@ -346,16 +225,14 @@ def visualize_samples(dataset: Dataset, num_samples: int = 3):
         plt.suptitle(f"Sample {i + 1}: {Path(meta['img_path']).name}")
         plt.tight_layout()
         plt.show()
-        # plt.savefig(f"sample_vis_{i}.png") # Uncomment to save instead of show if running headless
-        # print(f"Saved visualization for sample {i} to sample_vis_{i}.png")
 
 
 # -----------------------------
 # Training/helpers
 # -----------------------------
 def get_image_paths(
-        images_dir: Path,
-        exts: Tuple[str, ...] = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"),
+    images_dir: Path,
+    exts: Tuple[str, ...] = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"),
 ) -> List[Path]:
     """Collect all image paths under `images_dir` with allowed extensions."""
     image_paths: List[Path] = []
@@ -368,9 +245,9 @@ def get_image_paths(
 
 
 def save_checkpoint(
-        state: Dict[str, Any],
-        checkpoint_dir: Path,
-        filename: str,
+    state: Dict[str, Any],
+    checkpoint_dir: Path,
+    filename: str,
 ) -> Path:
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     ckpt_path = checkpoint_dir / filename
@@ -379,10 +256,10 @@ def save_checkpoint(
 
 
 def load_checkpoint(
-        ckpt_path: Path,
-        model: nn.Module,
-        optimizer: Optional[torch.optim.Optimizer] = None,
-        map_location: Optional[str] = None,
+    ckpt_path: Path,
+    model: nn.Module,
+    optimizer: Optional[torch.optim.Optimizer] = None,
+    map_location: Optional[str] = None,
 ) -> int:
     """Load model (and optionally optimizer) state from checkpoint.
 
@@ -429,7 +306,6 @@ def train_mim(args: argparse.Namespace) -> None:
     )
 
     # --- Visualization Step ---
-    # Display sample images before training starts
     if args.visualize:
         visualize_samples(dataset, num_samples=3)
     # --------------------------
@@ -442,7 +318,20 @@ def train_mim(args: argparse.Namespace) -> None:
         pin_memory=(device.type == "cuda"),
     )
 
-    model = UNet2D(
+    # 1. Select model class based on arguments
+    if args.model_type == "nac":
+        print("Using UNet2D with NAC and Attention (Best Model)...")
+        ModelClass = UNet2D_NAC
+    elif args.model_type == "scag":
+        print("Using UNet2D with scAG Attention Gates...")
+        ModelClass = UNet2D_scAG
+    else:
+        print("Using Standard UNet2D...")
+        ModelClass = UNet2D
+
+    # 2. Instantiate the model
+    # MIM: 1-channel input (masked) -> 1-channel output (reconstructed).
+    model = ModelClass(
         in_channels=1,
         out_channels=1,
         base_channels=args.base_channels,
@@ -543,15 +432,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log-dir", type=str, default="./tg3k/runs/mim_tg3k",
                         help="TensorBoard log directory.")
 
+    parser.add_argument("--model-type", type=str, default="unet",
+                        choices=["unet", "scag", "nac"],
+                        help="Choose model architecture: unet, scag, or nac (default: unet)")
+
     parser.add_argument("--img-height", type=int, default=224,
                         help="Resize height for input images.")
     parser.add_argument("--img-width", type=int, default=320,
                         help="Resize width for input images.")
 
     parser.add_argument("--batch-size", type=int, default=4, help="Batch size for training.")
-    parser.add_argument("--epochs", type=int, default=50, help="Number of training epochs.")
+    parser.add_argument("--epochs", type=int, default=1, help="Number of training epochs.")
     parser.add_argument("--num-workers", type=int, default=0, help="Number of DataLoader workers.")
-    parser.add_argument("--lr", type=float, default=1e-5, help="Learning rate.")
+    parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate.")
     parser.add_argument("--weight-decay", type=float, default=5e-5, help="Weight decay.")
     parser.add_argument("--base-channels", type=int, default=32,
                         help="Base number of feature maps in the U-Net.")
@@ -572,18 +465,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log-interval", type=int, default=50,
                         help="How many batches to wait before logging to stdout.")
 
-    # New argument to enable visualization
-    parser.add_argument("--visualize", action="store_true", default=True,
+    # Use --visualize to enable sample visualization before training
+    parser.add_argument("--visualize", action="store_true", default=False,
                         help="Visualize sample masked images before training starts.")
 
     return parser.parse_args()
 
 
 if __name__ == "__main__":
-    # Example usage with visualization enabled by default (or use --visualize flag)
-    # To run this in a Jupyter notebook, you might need to mock args or call train_mim directly.
-    # For script usage:
     args = parse_args()
     train_mim(args)
 
-# python tg3k_MIM_Pretrain.py --images-dir ./tg3k/tg3k/thyroid-image
+# scag
+# python tg3k_MIM_Pretrain.py --images-dir ./tg3k/tg3k/thyroid-image --checkpoint-dir ./tg3k/checkpoints_scag_mim --log-dir ./tg3k/runs/mim_tg3k_scag --model-type scag
+
+# nac
+# python tg3k_MIM_Pretrain.py --images-dir ./tg3k/tg3k/thyroid-image --checkpoint-dir ./tg3k/checkpoints_nac_mim --log-dir ./tg3k/runs/mim_tg3k_nac --model-type nac
