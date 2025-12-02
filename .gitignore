@@ -6,3 +6,5 @@ sts_tooth_data/
 
 # Exclude the tg3k folder
 tg3k/
+
+.idea/
