@@ -1,5 +1,7 @@
 import argparse
+import json
 from pathlib import Path
+from typing import List
 
 import torch
 from torch.utils.data import DataLoader
@@ -14,29 +16,88 @@ from utils import (
     load_checkpoint_for_resume,
     masked_l1_loss,
     create_unet_model,
-    visualize_samples,
 )
 
 
+def get_image_paths_excluding_val(
+    images_dir: Path,
+    split_json: str,
+) -> List[Path]:
+    """
+    Get all image paths under images_dir and exclude images whose IDs
+    appear in the 'val' field of split_json.
+    The remaining images are used for MIM pretraining.
+    ID handling is consistent with the finetune script: int -> 4-digit zero-padded string.
+    """
+    # Get all image paths using the original helper
+    all_image_paths = get_image_paths(images_dir)  # List[Path]
+    file_map = {p.stem: p for p in all_image_paths}
+
+    # Read JSON
+    split_path = Path(split_json).expanduser().resolve()
+    print(f"Loading split JSON from: {split_path}")
+    with open(split_path, "r") as f:
+        split_data = json.load(f)
+
+    val_ids = split_data.get("val", [])
+    excluded_stems = set()
+
+    # Same as in finetune: numeric ID -> 4-digit zero-padded string
+    for i in val_ids:
+        try:
+            base = f"{int(i):04d}"
+        except Exception:
+            base = str(i)
+        excluded_stems.add(base)
+
+    # Find actual val images that exist on disk
+    excluded_paths = []
+    for stem in excluded_stems:
+        if stem in file_map:
+            excluded_paths.append(file_map[stem])
+
+    print(
+        f"JSON contains {len(val_ids)} val IDs, "
+        f"actually found {len(excluded_paths)} val images to exclude."
+    )
+
+    # Remove val images from all_image_paths
+    excluded_set = set(excluded_paths)
+    remaining_paths = [p for p in all_image_paths if p not in excluded_set]
+
+    print(
+        f"Total images in {images_dir}: {len(all_image_paths)}\n"
+        f"Excluded (val) images: {len(excluded_paths)}\n"
+        f"Remaining images for MIM pretraining: {len(remaining_paths)}"
+    )
+
+    return remaining_paths
+
+
 def train_mim(args: argparse.Namespace) -> None:
-    # 固定随机种子
+    # Fix random seed
     set_seed(args.seed)
 
-    # 设备
+    # Device
     device = torch.device("cuda" if torch.cuda.is_available() and not args.cpu else "cpu")
     print("Using device:", device)
 
-    # 数据路径
+    # Data path
     images_dir = Path(args.images_dir).expanduser().resolve()
     print("Images directory:", images_dir)
 
-    image_paths = get_image_paths(images_dir)
+    # If split-json is provided, exclude val images defined in JSON; otherwise use all images
+    if args.split_json is not None:
+        image_paths = get_image_paths_excluding_val(images_dir, args.split_json)
+    else:
+        image_paths = get_image_paths(images_dir)
+
     print(f"Found {len(image_paths)} images for MIM pretraining.")
 
-    # 图像增强（统一使用 utils 中的构建函数）
+    # Image transforms (built from the common helper in utils)
     transform = build_ultrasound_transform(args.img_height, args.img_width)
 
-    # 数据集（统一使用 TG3KMaskedReconstructionDataset）
+    # Dataset (use TG3KMaskedReconstructionDataset)
     dataset = TG3KMaskedReconstructionDataset(
         image_paths=image_paths,
         transform=transform,
@@ -45,9 +106,9 @@ def train_mim(args: argparse.Namespace) -> None:
         max_block_size=args.max_block_size,
     )
 
-    # 可选：训练前可视化几张 masked 样本
-    if args.visualize:
-        visualize_samples(dataset, num_samples=3)
+    # Optional: visualize several masked samples before training
+    # if args.visualize:
+    #     visualize_samples(dataset, num_samples=3)
 
     # DataLoader
     loader = DataLoader(
@@ -58,7 +119,7 @@ def train_mim(args: argparse.Namespace) -> None:
         pin_memory=(device.type == "cuda"),
     )
 
-    # 模型（统一通过 create_unet_model 创建）
+    # Model (created via create_unet_model)
     model = create_unet_model(
         model_type=args.model_type,
         in_channels=1,
@@ -68,18 +129,18 @@ def train_mim(args: argparse.Namespace) -> None:
         device=device,
     )
 
-    # 优化器
+    # Optimizer
     optimizer = torch.optim.Adam(
         model.parameters(),
         lr=args.lr,
         weight_decay=args.weight_decay,
     )
 
-    # checkpoint 目录
+    # Checkpoint directory
     checkpoint_dir = Path(args.checkpoint_dir).expanduser().resolve()
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-    # 恢复训练（可选）
+    # Resume training (optional)
     start_epoch = 0
     if args.resume is not None:
         ckpt_path = Path(args.resume).expanduser().resolve()
@@ -134,7 +195,7 @@ def train_mim(args: argparse.Namespace) -> None:
         writer.add_scalar("train/epoch_loss", avg_epoch_loss, epoch)
         print(f"Epoch [{epoch + 1}/{args.epochs}] finished. Avg loss: {avg_epoch_loss:.6f}")
 
-        # 保存 latest checkpoint
+        # Save latest checkpoint
         latest_state = {
             "epoch": epoch,
             "model_state_dict": model.state_dict(),
@@ -144,7 +205,7 @@ def train_mim(args: argparse.Namespace) -> None:
         latest_path = save_checkpoint(latest_state, checkpoint_dir, "mim_latest.pth")
         print("Saved latest checkpoint to:", latest_path)
 
-        # 保存 best checkpoint
+        # Save best checkpoint (based on train loss)
         if avg_epoch_loss < best_loss:
             best_loss = avg_epoch_loss
             best_path = save_checkpoint(latest_state, checkpoint_dir, "mim_best.pth")
@@ -166,6 +227,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log-dir", type=str, default="./tg3k/runs/mim_tg3k",
                         help="TensorBoard log directory.")
 
+    parser.add_argument(
+        "--split-json",
+        type=str,
+        default=None,
+        help=(
+            "Optional split json (e.g. tg3k-trainval.json). "
+            "Images whose IDs are in 'val' will be excluded from pretraining."
+        ),
+    )
+
     parser.add_argument("--model-type", type=str, default="unet",
                         choices=["unet", "scag", "nac"],
                         help="Choose model architecture: unet, scag, or nac (default: unet)")
@@ -176,7 +247,7 @@ def parse_args() -> argparse.Namespace:
                         help="Resize width for input images.")
 
     parser.add_argument("--batch-size", type=int, default=4, help="Batch size for training.")
-    parser.add_argument("--epochs", type=int, default=1, help="Number of training epochs.")
+    parser.add_argument("--epochs", type=int, default=50, help="Number of training epochs.")
     parser.add_argument("--num-workers", type=int, default=0, help="Number of DataLoader workers.")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate.")
     parser.add_argument("--weight-decay", type=float, default=5e-5, help="Weight decay.")
@@ -200,8 +271,8 @@ def parse_args() -> argparse.Namespace:
                         help="How many batches to wait before logging to stdout.")
 
     # Use --visualize to enable sample visualization before training
-    parser.add_argument("--visualize", action="store_true", default=False,
-                        help="Visualize sample masked images before training starts.")
+    # parser.add_argument("--visualize", action="store_true", default=False,
+    #                     help="Visualize sample masked images before training starts.")
 
     return parser.parse_args()
 
@@ -210,8 +281,13 @@ if __name__ == "__main__":
     args = parse_args()
     train_mim(args)
 
+
+
+# # unet
+# # python tg3k_MIM_Pretrain.py --images-dir ./tg3k/tg3k/thyroid-image --checkpoint-dir ./tg3k/checkpoints_unet_mim --log-dir ./tg3k/runs/mim_tg3k_unet --model-type unet --split-json ./tg3k/tg3k/tg3k-trainval.json
+#
 # # scag
-# # python tg3k_MIM_Pretrain.py --images-dir ./tg3k/tg3k/thyroid-image --checkpoint-dir ./tg3k/checkpoints_scag_mim --log-dir ./tg3k/runs/mim_tg3k_scag --model-type scag
+# # python tg3k_MIM_Pretrain.py --images-dir ./tg3k/tg3k/thyroid-image --checkpoint-dir ./tg3k/checkpoints_scag_mim --log-dir ./tg3k/runs/mim_tg3k_scag --model-type scag --split-json ./tg3k/tg3k/tg3k-trainval.json
 #
 # # nac
-# # python tg3k_MIM_Pretrain.py --images-dir ./tg3k/tg3k/thyroid-image --checkpoint-dir ./tg3k/checkpoints_nac_mim --log-dir ./tg3k/runs/mim_tg3k_nac --model-type nac
+# # python tg3k_MIM_Pretrain.py --images-dir ./tg3k/tg3k/thyroid-image --checkpoint-dir ./tg3k/checkpoints_nac_mim --log-dir ./tg3k/runs/mim_tg3k_nac --model-type nac --split-json ./tg3k/tg3k/tg3k-trainval.json

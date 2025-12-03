@@ -3,7 +3,7 @@ import json
 import os
 import random
 from pathlib import Path
-from typing import List, Optional
+from typing import List
 
 import albumentations as A
 import cv2
@@ -17,9 +17,12 @@ from torch.utils.data import DataLoader, Dataset
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
+# ==== Import your models (model definitions are in models.py) ====
+from models import UNet2D, UNet2D_scAG, UNet2D_NAC
+
 
 # ============================================================
-# 1. 通用工具：随机种子
+# 1. Utility: random seed
 # ============================================================
 
 def set_seed(seed: int = 42) -> None:
@@ -32,29 +35,28 @@ def set_seed(seed: int = 42) -> None:
 
 
 # ============================================================
-# 2. 三段式 transforms（common / image / mask），不含 Crop_noise
+# 2. Three-stage transforms (common / image / mask)
 # ============================================================
 
 TARGET_HEIGHT = 224
 TARGET_WIDTH = 320
-MEAN = (0.5,)   # 单通道灰度
+MEAN = (0.5,)   # single-channel grayscale
 STD = (0.25,)
 
 
 def get_segmentation_train_transforms_split():
     """
-    Train 阶段的三段式 transforms：
-
-    - common_transforms: 同时作用在 image 和 mask 上的几何变换
-        * Resize
-        * HorizontalFlip
-        * Rotate
-    - image_transforms: 只作用在 image 的像素级操作
-        * Normalize(mean=0.5, std=0.25)
-        * ToTensorV2
-    - mask_transforms: 只作用在 mask 的操作
-        * ToFloat(max_value=255.0)
-        * ToTensorV2
+    Three-stage transforms for the training phase:
+      - common_transforms: geometric transforms applied to both image and mask
+          * Resize
+          * HorizontalFlip
+          * Rotate
+      - image_transforms: pixel-level transforms applied only to the image
+          * Normalize(mean=0.5, std=0.25)
+          * ToTensorV2
+      - mask_transforms: transforms applied only to the mask
+          * ToFloat(max_value=255.0)
+          * ToTensorV2
     """
     common_transforms = A.Compose(
         [
@@ -84,11 +86,10 @@ def get_segmentation_train_transforms_split():
 
 def get_segmentation_val_transforms_split():
     """
-    Val/Test 阶段的三段式 transforms：
-
-    - common_transforms: 只做确定性的 Resize（不做 Flip/Rotate）
-    - image_transforms: Normalize + ToTensor
-    - mask_transforms: ToFloat + ToTensor
+    Three-stage transforms for val/test:
+      - common_transforms: only deterministic Resize (no Flip/Rotate)
+      - image_transforms: Normalize + ToTensor
+      - mask_transforms: ToFloat + ToTensor
     """
     common_transforms = A.Compose(
         [
@@ -115,18 +116,18 @@ def get_segmentation_val_transforms_split():
 
 
 # ============================================================
-# 3. 数据集：三段式 ThyroidDataset
+# 3. Dataset: three-stage ThyroidDataset
 # ============================================================
 
 class ThyroidDataset(Dataset):
     """
-    三段式数据集实现：
-      - image_ids: 文件名列表（可以带扩展名或只是 stem）
-      - images_dir: 图像目录
-      - masks_dir: 掩码目录
-      - common_transforms: 同时对 image / mask 做的几何变换
-      - image_transforms: 只对 image 做的变换（Normalize + ToTensor）
-      - mask_transforms: 只对 mask 做的变换（ToFloat + ToTensor + 后续二值化）
+    Dataset implementation with three-stage transforms:
+      - image_ids: list of file names (can be with or without extension)
+      - images_dir: directory for images
+      - masks_dir: directory for masks
+      - common_transforms: geometric transforms applied to both image and mask
+      - image_transforms: transforms applied only to the image (Normalize + ToTensor)
+      - mask_transforms: transforms applied only to the mask (ToFloat + ToTensor + binarization)
     """
 
     def __init__(
@@ -154,27 +155,27 @@ class ThyroidDataset(Dataset):
         img_path = self._find_file(self.images_dir, img_id)
         mask_path = self._find_file(self.masks_dir, img_id)
 
-        # 以灰度方式读入
+        # Load as grayscale
         img_np = np.array(Image.open(img_path).convert("L"))   # (H, W)
         img_np = np.expand_dims(img_np, axis=-1)               # (H, W, 1) for albumentations
         mask_np = np.array(Image.open(mask_path).convert("L")) # (H, W)
 
-        # 1) 公共几何变换：保证 image / mask 对齐
+        # 1) Common geometric transforms: keep image and mask aligned
         augmented_common = self.common_transforms(image=img_np, mask=mask_np)
-        img_common = augmented_common["image"]   # (H, W, 1) 或 (H, W)
+        img_common = augmented_common["image"]   # (H, W, 1) or (H, W)
         mask_common = augmented_common["mask"]   # (H, W)
 
-        # 2) image-only 变换：Normalize + ToTensorV2
+        # 2) Image-only transforms: Normalize + ToTensorV2
         img_t = self.image_transforms(image=img_common)["image"]  # Tensor (1, H, W)
 
-        # 3) mask-only 变换：ToFloat + ToTensorV2
-        mask_t = self.mask_transforms(image=mask_common)["image"]  # Tensor (H, W) 或 (1, H, W)
+        # 3) Mask-only transforms: ToFloat + ToTensorV2
+        mask_t = self.mask_transforms(image=mask_common)["image"]  # Tensor (H, W) or (1, H, W)
 
-        # 保证 mask 有 channel 维度
+        # Ensure mask has a channel dimension
         if mask_t.ndim == 2:
             mask_t = mask_t.unsqueeze(0)  # (H, W) -> (1, H, W)
 
-        # 二值化到 {0,1} —— 在 ToFloat 之后做
+        # Binarize to {0,1}
         mask_t = (mask_t > 0.5).float()
 
         meta = str(img_path)
@@ -182,7 +183,8 @@ class ThyroidDataset(Dataset):
 
     def _find_file(self, folder: Path, filename: str) -> Path:
         """
-        根据文件名（可带/不带扩展名）在 folder 下自动尝试常见扩展名。
+        Given a file name (with or without extension), try common image extensions
+        under the given folder and find the actual file.
         """
         candidate = folder / filename
         if candidate.exists():
@@ -198,139 +200,7 @@ class ThyroidDataset(Dataset):
 
 
 # ============================================================
-# 4. 模型结构：UNet2D（与 MIM 预训练脚本完全一致）
-# ============================================================
-
-class DoubleConv(nn.Module):
-    """(Conv2d -> BN -> ReLU) * 2"""
-
-    def __init__(self, in_channels: int, out_channels: int, mid_channels: Optional[int] = None):
-        super().__init__()
-        if mid_channels is None:
-            mid_channels = out_channels
-        self.double_conv = nn.Sequential(
-            nn.Conv2d(in_channels, mid_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(mid_channels),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(mid_channels, out_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.double_conv(x)
-
-
-class Down(nn.Module):
-    """下采样：MaxPool2d -> DoubleConv"""
-
-    def __init__(self, in_channels: int, out_channels: int):
-        super().__init__()
-        self.maxpool_conv = nn.Sequential(
-            nn.MaxPool2d(kernel_size=2, stride=2),
-            DoubleConv(in_channels, out_channels),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.maxpool_conv(x)
-
-
-class Up(nn.Module):
-    """上采样：Upsample 或 ConvTranspose2d -> 拼接 -> DoubleConv"""
-
-    def __init__(self, in_channels: int, out_channels: int, bilinear: bool = True):
-        super().__init__()
-
-        if bilinear:
-            self.up = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=True)
-            self.conv = DoubleConv(in_channels, out_channels, in_channels // 2)
-        else:
-            self.up = nn.ConvTranspose2d(
-                in_channels, in_channels // 2, kernel_size=2, stride=2
-            )
-            self.conv = DoubleConv(in_channels, out_channels)
-
-    def forward(self, x1: torch.Tensor, x2: torch.Tensor) -> torch.Tensor:
-        # x1: decoder 上一层输出
-        # x2: encoder 对应层（skip 连接）
-        x1 = self.up(x1)
-
-        # 处理尺寸对不齐（奇数尺寸）
-        diffY = x2.size()[2] - x1.size()[2]
-        diffX = x2.size()[3] - x1.size()[3]
-        x1 = F.pad(
-            x1,
-            [diffX // 2, diffX - diffX // 2,
-             diffY // 2, diffY - diffY // 2],
-        )
-
-        x = torch.cat([x2, x1], dim=1)
-        return self.conv(x)
-
-
-class OutConv(nn.Module):
-    """最后 1x1 卷积到输出通道"""
-
-    def __init__(self, in_channels: int, out_channels: int):
-        super().__init__()
-        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=1)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.conv(x)
-
-
-class UNet2D(nn.Module):
-    """
-    与 MIM 预训练脚本中的 UNet2D 完全一致的结构：
-      - in_channels = 1
-      - out_channels = 1
-      - base_channels 默认 32
-      - bilinear 控制是否使用双线性上采样
-    """
-
-    def __init__(
-        self,
-        in_channels: int = 1,
-        out_channels: int = 1,
-        base_channels: int = 32,
-        bilinear: bool = True,
-    ):
-        super().__init__()
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        self.base_channels = base_channels
-        self.bilinear = bilinear
-
-        self.inc = DoubleConv(in_channels, base_channels)
-        self.down1 = Down(base_channels, base_channels * 2)
-        self.down2 = Down(base_channels * 2, base_channels * 4)
-        self.down3 = Down(base_channels * 4, base_channels * 8)
-        factor = 2 if bilinear else 1
-        self.down4 = Down(base_channels * 8, base_channels * 16 // factor)
-
-        self.up1 = Up(base_channels * 16, base_channels * 8 // factor, bilinear)
-        self.up2 = Up(base_channels * 8, base_channels * 4 // factor, bilinear)
-        self.up3 = Up(base_channels * 4, base_channels * 2 // factor, bilinear)
-        self.up4 = Up(base_channels * 2, base_channels, bilinear)
-        self.outc = OutConv(base_channels, out_channels)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x1 = self.inc(x)
-        x2 = self.down1(x1)
-        x3 = self.down2(x2)
-        x4 = self.down3(x3)
-        x5 = self.down4(x4)
-
-        x = self.up1(x5, x4)
-        x = self.up2(x, x3)
-        x = self.up3(x, x2)
-        x = self.up4(x, x1)
-        logits = self.outc(x)
-        return logits
-
-
-# ============================================================
-# 5. 损失函数 & 指标（对齐 baseline：BCE + λ·Dice）
+# 4. Loss functions & metrics (BCE + λ · Dice)
 # ============================================================
 
 def dice_loss_from_logits(
@@ -355,7 +225,7 @@ def combined_segmentation_loss(
     lambda_dice: float = 0.2,
 ) -> torch.Tensor:
     """
-    组合损失：BCEWithLogits + λ * DiceLoss
+    Combined loss: BCEWithLogits + λ * DiceLoss
     """
     bce = F.binary_cross_entropy_with_logits(logits, targets)
     dloss = dice_loss_from_logits(logits, targets)
@@ -382,20 +252,20 @@ def compute_dice_score(
 
 
 # ============================================================
-# 6. 从 MIM 预训练 checkpoint 加载权重
+# 5. Load weights from MIM-pretrained checkpoint
 # ============================================================
 
 def load_pretrained_weights(model: nn.Module, path: str, device: torch.device) -> nn.Module:
     """
-    从 MIM 预训练的 checkpoint 中加载权重。
+    Load weights from a MIM-pretrained checkpoint.
 
-    支持：
+    Supported formats:
       - {'model_state_dict': ...}
       - {'state_dict': ...}
       - {'model': ...}
-      - 纯 state_dict
+      - a plain state_dict
 
-    只加载 name + shape 都匹配的层，其余保持随机初始化。
+    Only layers with matching name AND shape are loaded; the rest stay randomly initialized.
     """
     print(f"Loading pretrained weights from: {path}")
     checkpoint = torch.load(path, map_location=device)
@@ -431,7 +301,51 @@ def load_pretrained_weights(model: nn.Module, path: str, device: torch.device) -
 
 
 # ============================================================
-# 7. 评估函数（val/test 共用，返回 mean Dice）
+# 6. Model factory: model_type consistent with pretraining
+# ============================================================
+
+def create_unet_model(
+    model_type: str,
+    in_channels: int,
+    out_channels: int,
+    base_channels: int,
+    bilinear: bool,
+    device: torch.device,
+) -> nn.Module:
+    """
+    Model factory consistent with the MIM pretraining stage.
+    model_type: 'unet' / 'scag' / 'nac'
+    """
+    if model_type == "unet":
+        model = UNet2D(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            base_channels=base_channels,
+            bilinear=bilinear,
+        )
+    elif model_type == "scag":
+        model = UNet2D_scAG(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            base_channels=base_channels,
+            bilinear=bilinear,
+        )
+    elif model_type == "nac":
+        model = UNet2D_NAC(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            base_channels=base_channels,
+            bilinear=bilinear,
+        )
+    else:
+        raise ValueError(f"Unknown model_type: {model_type}")
+
+    model = model.to(device)
+    return model
+
+
+# ============================================================
+# 7. Evaluation function (shared by val/test, returns mean Dice)
 # ============================================================
 
 @torch.no_grad()
@@ -453,7 +367,7 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> floa
 
 
 # ============================================================
-# 8. 训练 + Early Stopping + 使用 best_model 做 Test 评估
+# 8. Training + Early Stopping + evaluate best_model on Test set
 # ============================================================
 
 def train_and_evaluate(args):
@@ -463,7 +377,7 @@ def train_and_evaluate(args):
     print(f"Using device: {device}")
 
     # -----------------------------
-    # 数据文件收集
+    # Collect image file names
     # -----------------------------
     all_image_files = sorted(
         f for f in os.listdir(args.images_dir)
@@ -471,7 +385,7 @@ def train_and_evaluate(args):
     )
 
     # -----------------------------
-    # 数据划分：优先使用 split-json
+    # Data split: prefer split-json if provided
     # -----------------------------
     if args.split_json:
         print(f"Loading split from {args.split_json}...")
@@ -493,7 +407,7 @@ def train_and_evaluate(args):
         train_files = get_files_from_ids(split_data['train'], all_image_files)
         val_all_files = get_files_from_ids(split_data['val'], all_image_files)
 
-        # 可选：子采样 train 到固定数量
+        # Optional: subsample train to a fixed size
         if args.train_subset_size > 0 and len(train_files) > args.train_subset_size:
             print(f"Subsampling training set from {len(train_files)} to "
                   f"{args.train_subset_size} (seed={args.seed}).")
@@ -524,7 +438,7 @@ def train_and_evaluate(args):
               f"Val={len(val_files)}, Test={len(test_files)}")
 
     # -----------------------------
-    # 构建三段式 Dataset & DataLoader
+    # Build three-stage Dataset & DataLoader
     # -----------------------------
     train_common, train_img_tf, train_mask_tf = get_segmentation_train_transforms_split()
     val_common, val_img_tf, val_mask_tf = get_segmentation_val_transforms_split()
@@ -549,7 +463,7 @@ def train_and_evaluate(args):
         image_ids=test_files,
         images_dir=args.images_dir,
         masks_dir=args.masks_dir,
-        common_transforms=val_common,   # test 也用 val 的（无随机增强）
+        common_transforms=val_common,   # test uses val transforms (no random aug)
         image_transforms=val_img_tf,
         mask_transforms=val_mask_tf,
     )
@@ -577,22 +491,27 @@ def train_and_evaluate(args):
     )
 
     # -----------------------------
-    # 初始化模型（与 MIM 预训练 UNet2D 完全同构）
+    # Initialize model (fully consistent with MIM pretraining)
     # -----------------------------
-    model = UNet2D(
+    model = create_unet_model(
+        model_type=args.model_type,
         in_channels=1,
         out_channels=1,
         base_channels=args.base_channels,
         bilinear=not args.no_bilinear,
-    ).to(device)
-    print(f"UNet2D initialized with base_channels={args.base_channels}, "
-          f"bilinear={not args.no_bilinear}")
+        device=device,
+    )
+    print(
+        f"Model initialized: type={args.model_type}, "
+        f"base_channels={args.base_channels}, "
+        f"bilinear={not args.no_bilinear}"
+    )
 
-    # 预训练权重（MIM）
+    # Pretrained weights (MIM)
     if args.init_from:
         model = load_pretrained_weights(model, args.init_from, device)
 
-    # 如果需要从完整 checkpoint 恢复
+    # Resume from a full checkpoint (continue finetuning)
     if args.resume:
         print(f"Resuming training from full model checkpoint: {args.resume}...")
         resume_ckpt = torch.load(args.resume, map_location=device)
@@ -601,7 +520,7 @@ def train_and_evaluate(args):
         else:
             model.load_state_dict(resume_ckpt)
 
-    # 优化器
+    # Optimizer
     optimizer = torch.optim.Adam(
         model.parameters(),
         lr=args.lr,
@@ -621,7 +540,7 @@ def train_and_evaluate(args):
     print(f"TensorBoard logging to {log_dir}")
 
     # -----------------------------
-    # 训练循环 + 早停
+    # Training loop + early stopping
     # -----------------------------
     best_val_dice = 0.0
     epochs_without_improvement = 0
@@ -670,7 +589,7 @@ def train_and_evaluate(args):
             f"Train Loss: {avg_train_loss:.4f}, Val Dice: {val_dice:.4f}"
         )
 
-        # ---- 保存 best model & 早停 ----
+        # ---- Save best model & early stopping ----
         if val_dice > best_val_dice:
             best_val_dice = val_dice
             epochs_without_improvement = 0
@@ -688,7 +607,7 @@ def train_and_evaluate(args):
     print("Training finished.")
 
     # -----------------------------
-    # 使用 best_model 在 Test set 上评估 Dice
+    # Evaluate best_model on the Test set
     # -----------------------------
     if best_path.exists():
         print(f"Loading best model from {best_path} for final test evaluation...")
@@ -701,16 +620,16 @@ def train_and_evaluate(args):
 
 
 # ============================================================
-# 9. 参数解析
+# 9. Argument parsing
 # ============================================================
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Fine-tune UNet2D segmentation on TG3K with MIM-pretrained weights "
-                    "and 3-stage transforms (common/image/mask)."
+        description="Fine-tune UNet2D / UNet2D_scAG / UNet2D_NAC segmentation on TG3K "
+                    "with MIM-pretrained weights and 3-stage transforms."
     )
 
-    # 路径
+    # Paths
     parser.add_argument("--images-dir", type=str, required=True,
                         help="Directory containing images")
     parser.add_argument("--masks-dir", type=str, required=True,
@@ -723,19 +642,26 @@ def parse_args():
     parser.add_argument("--tensorboard-dir", type=str, default=None,
                         help="Directory for TensorBoard logs (optional)")
 
-    # 预训练 & 恢复
+    # Pretraining & resume
     parser.add_argument("--init-from", type=str, default=None,
                         help="Path to pretraining checkpoint (e.g., MIM mim_best.pth)")
     parser.add_argument("--resume", type=str, default=None,
                         help="Path to full model checkpoint to resume from")
 
-    # 模型超参数（需与 MIM 预训练一致）
+    # Model hyperparameters (must match MIM pretraining)
+    parser.add_argument(
+        "--model-type",
+        type=str,
+        default="unet",
+        choices=["unet", "scag", "nac"],
+        help="Backbone type, must match MIM pretrain: unet / scag / nac",
+    )
     parser.add_argument("--base-channels", type=int, default=32,
                         help="Base number of feature maps in UNet2D (match MIM pretrain)")
     parser.add_argument("--no-bilinear", action="store_true",
                         help="Use ConvTranspose instead of bilinear upsampling")
 
-    # 训练超参数
+    # Training hyperparameters
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch-size", type=int, default=4,
                         help="Batch size (default 4 matches baseline)")
@@ -746,7 +672,7 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--cpu", action="store_true", help="Force CPU usage")
 
-    # BCE + Dice 中的 λ
+    # λ in BCE + Dice
     parser.add_argument("--lambda-dice", type=float, default=0.2,
                         help="Weight for Dice loss term in combined loss (BCE + λ*Dice)")
 
@@ -754,11 +680,11 @@ def parse_args():
     parser.add_argument("--patience", type=int, default=20,
                         help="Early stopping patience based on validation Dice")
 
-    # 没有 split_json 时的随机划分比例
+    # Random split ratios when split_json is not provided
     parser.add_argument("--val-ratio", type=float, default=0.1)
     parser.add_argument("--test-ratio", type=float, default=0.1)
 
-    # 使用 split_json 时，可选的训练子集大小（对齐 baseline 500 张）
+    # Optional training subset size when using split_json (e.g., 500 images as in baseline)
     parser.add_argument("--train-subset-size", type=int, default=0,
                         help="If >0 and using split-json, subsample this many training images")
 
@@ -769,3 +695,29 @@ def parse_args():
 if __name__ == "__main__":
     args = parse_args()
     train_and_evaluate(args)
+
+
+# MIM
+# # unet
+# python tg3k_finetune_segementation.py --images-dir ./tg3k/tg3k/thyroid-image --masks-dir ./tg3k/tg3k/thyroid-mask --split-json ./tg3k/tg3k/tg3k-trainval.json --init-from ./tg3k/checkpoints_unet_mim/mim_best.pth --tensorboard-dir ./tg3k/runs/mim_unet_finetune_tg3k --save-dir ./tg3k/checkpoints_finetune/mim_unet --train-subset-size 500 --model-type unet
+#
+# # scag
+# python tg3k_finetune_segementation.py --images-dir ./tg3k/tg3k/thyroid-image --masks-dir ./tg3k/tg3k/thyroid-mask --split-json ./tg3k/tg3k/tg3k-trainval.json --init-from ./tg3k/checkpoints_scag_mim/mim_best.pth --tensorboard-dir ./tg3k/runs/mim_scag_finetune_tg3k --save-dir ./tg3k/checkpoints_finetune/mim_scag --train-subset-size 500 --model-type scag
+#
+# # nac
+# python tg3k_finetune_segementation.py --images-dir ./tg3k/tg3k/thyroid-image --masks-dir ./tg3k/tg3k/thyroid-mask --split-json ./tg3k/tg3k/tg3k-trainval.json --init-from ./tg3k/checkpoints_nac_mim/mim_best.pth --tensorboard-dir ./tg3k/runs/mim_nac_finetune_tg3k --save-dir ./tg3k/checkpoints_finetune/mim_nac --train-subset-size 500 --model-type nac
+
+
+# Full Image
+# # unet
+# python tg3k_finetune_segementation.py --images-dir ./tg3k/tg3k/thyroid-image --masks-dir ./tg3k/tg3k/thyroid-mask --split-json ./tg3k/tg3k/tg3k-trainval.json --init-from ./tg3k/checkpoints_unet_fullimage/fullimage_best.pth --tensorboard-dir ./tg3k/runs/fullimage_unet_finetune_tg3k --save-dir ./tg3k/checkpoints_finetune/fullimage_unet --train-subset-size 500 --model-type unet
+#
+# # scag
+# python tg3k_finetune_segementation.py --images-dir ./tg3k/tg3k/thyroid-image --masks-dir ./tg3k/tg3k/thyroid-mask --split-json ./tg3k/tg3k/tg3k-trainval.json --init-from ./tg3k/checkpoints_scag_fullimage/fullimage_best.pth --tensorboard-dir ./tg3k/runs/fullimage_scag_finetune_tg3k --save-dir ./tg3k/checkpoints_finetune/fullimage_scag --train-subset-size 500 --model-type scag
+#
+# # nac
+# python tg3k_finetune_segementation.py --images-dir ./tg3k/tg3k/thyroid-image --masks-dir ./tg3k/tg3k/thyroid-mask --split-json ./tg3k/tg3k/tg3k-trainval.json --init-from ./tg3k/checkpoints_nac_fullimage/fullimage_best.pth --tensorboard-dir ./tg3k/runs/fullimage_nac_finetune_tg3k --save-dir ./tg3k/checkpoints_finetune/fullimage_nac --train-subset-size 500 --model-type nac
+
+
+
+
