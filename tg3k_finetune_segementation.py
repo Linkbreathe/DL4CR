@@ -15,9 +15,8 @@ from albumentations.pytorch import ToTensorV2
 from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.tensorboard import SummaryWriter
-from tqdm import tqdm
 
-# ==== Import your models (model definitions are in models.py) ====
+# Import model definitions from your own file
 from models import UNet2D, UNet2D_scAG, UNet2D_NAC
 
 
@@ -26,6 +25,9 @@ from models import UNet2D, UNet2D_scAG, UNet2D_NAC
 # ============================================================
 
 def set_seed(seed: int = 42) -> None:
+    """
+    Fix all random seeds to make experiments reproducible.
+    """
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -46,17 +48,18 @@ STD = (0.25,)
 
 def get_segmentation_train_transforms_split():
     """
-    Three-stage transforms for the training phase:
-      - common_transforms: geometric transforms applied to both image and mask
-          * Resize
-          * HorizontalFlip
-          * Rotate
-      - image_transforms: pixel-level transforms applied only to the image
-          * Normalize(mean=0.5, std=0.25)
-          * ToTensorV2
-      - mask_transforms: transforms applied only to the mask
-          * ToFloat(max_value=255.0)
-          * ToTensorV2
+    Three-stage transforms for the training phase.
+
+    - common_transforms: geometric transforms applied to both image & mask
+        * Resize
+        * HorizontalFlip
+        * Rotate
+    - image_transforms: pixel-level transforms applied only to the image
+        * Normalize(mean=0.5, std=0.25)
+        * ToTensorV2
+    - mask_transforms: transforms applied only to the mask
+        * ToFloat(max_value=255.0)
+        * ToTensorV2
     """
     common_transforms = A.Compose(
         [
@@ -86,10 +89,11 @@ def get_segmentation_train_transforms_split():
 
 def get_segmentation_val_transforms_split():
     """
-    Three-stage transforms for val/test:
-      - common_transforms: only deterministic Resize (no Flip/Rotate)
-      - image_transforms: Normalize + ToTensor
-      - mask_transforms: ToFloat + ToTensor
+    Three-stage transforms for validation / test phase.
+
+    - common_transforms: deterministic Resize only (no flip / rotate).
+    - image_transforms: Normalize + ToTensor.
+    - mask_transforms: ToFloat + ToTensor.
     """
     common_transforms = A.Compose(
         [
@@ -121,13 +125,20 @@ def get_segmentation_val_transforms_split():
 
 class ThyroidDataset(Dataset):
     """
-    Dataset implementation with three-stage transforms:
-      - image_ids: list of file names (can be with or without extension)
-      - images_dir: directory for images
-      - masks_dir: directory for masks
-      - common_transforms: geometric transforms applied to both image and mask
-      - image_transforms: transforms applied only to the image (Normalize + ToTensor)
-      - mask_transforms: transforms applied only to the mask (ToFloat + ToTensor + binarization)
+    Dataset implementation with three-stage transforms.
+
+    Args:
+        image_ids: list of file names (with or without extension).
+        images_dir: directory of images.
+        masks_dir: directory of segmentation masks.
+        common_transforms: transforms applied jointly to image & mask.
+        image_transforms: transforms applied only to the image.
+        mask_transforms: transforms applied only to the mask.
+
+    Returns:
+        image: Tensor of shape (1, H, W), normalized.
+        mask:  Tensor of shape (1, H, W), binarized to {0,1}.
+        meta:  string path to the original image file.
     """
 
     def __init__(
@@ -160,7 +171,7 @@ class ThyroidDataset(Dataset):
         img_np = np.expand_dims(img_np, axis=-1)               # (H, W, 1) for albumentations
         mask_np = np.array(Image.open(mask_path).convert("L")) # (H, W)
 
-        # 1) Common geometric transforms: keep image and mask aligned
+        # 1) Common geometric transforms (keep image & mask aligned)
         augmented_common = self.common_transforms(image=img_np, mask=mask_np)
         img_common = augmented_common["image"]   # (H, W, 1) or (H, W)
         mask_common = augmented_common["mask"]   # (H, W)
@@ -175,7 +186,7 @@ class ThyroidDataset(Dataset):
         if mask_t.ndim == 2:
             mask_t = mask_t.unsqueeze(0)  # (H, W) -> (1, H, W)
 
-        # Binarize to {0,1}
+        # Binarize mask to {0, 1}
         mask_t = (mask_t > 0.5).float()
 
         meta = str(img_path)
@@ -183,8 +194,8 @@ class ThyroidDataset(Dataset):
 
     def _find_file(self, folder: Path, filename: str) -> Path:
         """
-        Given a file name (with or without extension), try common image extensions
-        under the given folder and find the actual file.
+        Find real file on disk for a given ID (with or without extension).
+        Tries several common image extensions.
         """
         candidate = folder / filename
         if candidate.exists():
@@ -208,6 +219,13 @@ def dice_loss_from_logits(
     targets: torch.Tensor,
     eps: float = 1e-6,
 ) -> torch.Tensor:
+    """
+    Dice loss computed from raw logits.
+
+    Args:
+        logits: raw outputs of the model (B, 1, H, W).
+        targets: ground truth masks (B, 1, H, W).
+    """
     probs = torch.sigmoid(logits)
     probs_flat = probs.view(probs.size(0), -1)
     targets_flat = targets.view(targets.size(0), -1)
@@ -225,7 +243,8 @@ def combined_segmentation_loss(
     lambda_dice: float = 0.2,
 ) -> torch.Tensor:
     """
-    Combined loss: BCEWithLogits + λ * DiceLoss
+    Combined segmentation loss:
+        L = BCEWithLogits + λ * DiceLoss
     """
     bce = F.binary_cross_entropy_with_logits(logits, targets)
     dloss = dice_loss_from_logits(logits, targets)
@@ -238,6 +257,9 @@ def compute_dice_score(
     threshold: float = 0.5,
     eps: float = 1e-6,
 ) -> float:
+    """
+    Compute mean Dice score over a batch using thresholded predictions.
+    """
     probs = torch.sigmoid(logits)
     preds = (probs >= threshold).float()
 
@@ -263,9 +285,10 @@ def load_pretrained_weights(model: nn.Module, path: str, device: torch.device) -
       - {'model_state_dict': ...}
       - {'state_dict': ...}
       - {'model': ...}
-      - a plain state_dict
+      - plain state_dict
 
-    Only layers with matching name AND shape are loaded; the rest stay randomly initialized.
+    Only layers whose name AND shape match are loaded.
+    The remaining layers stay randomly initialized.
     """
     print(f"Loading pretrained weights from: {path}")
     checkpoint = torch.load(path, map_location=device)
@@ -292,8 +315,10 @@ def load_pretrained_weights(model: nn.Module, path: str, device: torch.device) -
     else:
         print(f"Loaded {len(pretrained_dict)} layers from pretrained checkpoint.")
         if missing_keys:
-            print(f"{len(missing_keys)} layers remain randomly initialized "
-                  f"(e.g. {list(missing_keys)[:5]}...)")
+            print(
+                f"{len(missing_keys)} layers remain randomly initialized "
+                f"(e.g. {list(missing_keys)[:5]}...)"
+            )
 
     model_dict.update(pretrained_dict)
     model.load_state_dict(model_dict)
@@ -313,8 +338,10 @@ def create_unet_model(
     device: torch.device,
 ) -> nn.Module:
     """
-    Model factory consistent with the MIM pretraining stage.
-    model_type: 'unet' / 'scag' / 'nac'
+    Factory to create U-Net variants consistent with MIM pretraining.
+
+    Args:
+        model_type: one of ['unet', 'scag', 'nac'].
     """
     if model_type == "unet":
         model = UNet2D(
@@ -345,11 +372,14 @@ def create_unet_model(
 
 
 # ============================================================
-# 7. Evaluation function (shared by val/test, returns mean Dice)
+# 7. Evaluation function (val/test)
 # ============================================================
 
 @torch.no_grad()
 def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> float:
+    """
+    Evaluate mean Dice score over an entire DataLoader.
+    """
     model.eval()
     dice_sum = 0.0
     steps = 0
@@ -367,10 +397,13 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> floa
 
 
 # ============================================================
-# 8. Training + Early Stopping + evaluate best_model on Test set
+# 8. Training + Early Stopping + final Test evaluation
 # ============================================================
 
 def train_and_evaluate(args):
+    """
+    Main training loop with early stopping and final test evaluation.
+    """
     set_seed(args.seed)
 
     device = torch.device('cuda' if torch.cuda.is_available() and not args.cpu else 'cpu')
@@ -393,6 +426,11 @@ def train_and_evaluate(args):
             split_data = json.load(f)
 
         def get_files_from_ids(id_list, available_files):
+            """
+            Map ID list (e.g. [1, 2, 3]) to actual file names based on stem.
+            If an ID is numeric, it is converted to a 4-digit zero-padded string
+            (e.g. 1 -> '0001').
+            """
             file_map = {os.path.splitext(f)[0]: f for f in available_files}
             res = []
             for i in id_list:
@@ -407,10 +445,12 @@ def train_and_evaluate(args):
         train_files = get_files_from_ids(split_data['train'], all_image_files)
         val_all_files = get_files_from_ids(split_data['val'], all_image_files)
 
-        # Optional: subsample train to a fixed size
+        # Optional: subsample train set to a fixed size
         if args.train_subset_size > 0 and len(train_files) > args.train_subset_size:
-            print(f"Subsampling training set from {len(train_files)} to "
-                  f"{args.train_subset_size} (seed={args.seed}).")
+            print(
+                f"Subsampling training set from {len(train_files)} to "
+                f"{args.train_subset_size} (seed={args.seed})."
+            )
             random.seed(args.seed)
             train_files = random.sample(train_files, args.train_subset_size)
 
@@ -420,9 +460,12 @@ def train_and_evaluate(args):
         val_files = val_all_files[:split_point]
         test_files = val_all_files[split_point:]
 
-        print(f"Data split from JSON: Train={len(train_files)}, "
-              f"Val={len(val_files)}, Test={len(test_files)}")
+        print(
+            f"Data split from JSON: Train={len(train_files)}, "
+            f"Val={len(val_files)}, Test={len(test_files)}"
+        )
     else:
+        # Fallback: random split without JSON
         print("No split JSON provided. Using random split.")
         random.seed(args.seed)
         random.shuffle(all_image_files)
@@ -434,8 +477,10 @@ def train_and_evaluate(args):
         val_files = all_image_files[train_count:train_count + val_count]
         test_files = all_image_files[train_count + val_count:]
 
-        print(f"Random Split: Train={len(train_files)}, "
-              f"Val={len(val_files)}, Test={len(test_files)}")
+        print(
+            f"Random Split: Train={len(train_files)}, "
+            f"Val={len(val_files)}, Test={len(test_files)}"
+        )
 
     # -----------------------------
     # Build three-stage Dataset & DataLoader
@@ -463,7 +508,7 @@ def train_and_evaluate(args):
         image_ids=test_files,
         images_dir=args.images_dir,
         masks_dir=args.masks_dir,
-        common_transforms=val_common,   # test uses val transforms (no random aug)
+        common_transforms=val_common,   # test uses same transforms as val (no random aug)
         image_transforms=val_img_tf,
         mask_transforms=val_mask_tf,
     )
@@ -491,7 +536,7 @@ def train_and_evaluate(args):
     )
 
     # -----------------------------
-    # Initialize model (fully consistent with MIM pretraining)
+    # Initialize model (match MIM pretraining)
     # -----------------------------
     model = create_unet_model(
         model_type=args.model_type,
@@ -507,13 +552,13 @@ def train_and_evaluate(args):
         f"bilinear={not args.no_bilinear}"
     )
 
-    # Pretrained weights (MIM)
+    # Load MIM-pretrained weights if provided
     if args.init_from:
         model = load_pretrained_weights(model, args.init_from, device)
 
-    # Resume from a full checkpoint (continue finetuning)
+    # Resume from full model checkpoint if provided
     if args.resume:
-        print(f"Resuming training from full model checkpoint: {args.resume}...")
+        print(f"Resuming training from full checkpoint: {args.resume}...")
         resume_ckpt = torch.load(args.resume, map_location=device)
         if isinstance(resume_ckpt, dict) and "state_dict" in resume_ckpt:
             model.load_state_dict(resume_ckpt["state_dict"])
@@ -528,7 +573,7 @@ def train_and_evaluate(args):
     )
 
     # -----------------------------
-    # TensorBoard
+    # TensorBoard setup
     # -----------------------------
     if args.tensorboard_dir:
         log_dir = Path(args.tensorboard_dir)
@@ -551,36 +596,43 @@ def train_and_evaluate(args):
     best_path = args.save_dir / "best_model.pth"
 
     for epoch in range(1, args.epochs + 1):
-        # ---- Train ----
+        # ---------- Train ----------
         model.train()
         epoch_loss = 0.0
         num_batches = 0
 
-        with tqdm(total=len(train_loader), desc=f"Epoch {epoch}/{args.epochs} [train]", unit='batch') as pbar:
-            for images, masks, _ in train_loader:
-                images = images.to(device, dtype=torch.float32)
-                masks = masks.to(device, dtype=torch.float32)
+        for batch_idx, (images, masks, _) in enumerate(train_loader):
+            images = images.to(device, dtype=torch.float32)
+            masks = masks.to(device, dtype=torch.float32)
 
-                logits = model(images)
-                loss = combined_segmentation_loss(logits, masks, lambda_dice=args.lambda_dice)
+            logits = model(images)
+            loss = combined_segmentation_loss(
+                logits, masks, lambda_dice=args.lambda_dice
+            )
 
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
 
-                epoch_loss += loss.item()
-                num_batches += 1
-                global_step += 1
+            epoch_loss += loss.item()
+            num_batches += 1
+            global_step += 1
 
-                writer.add_scalar('train/loss_step', loss.item(), global_step)
+            writer.add_scalar('train/loss_step', loss.item(), global_step)
 
-                pbar.set_postfix(loss=f"{loss.item():.4f}")
-                pbar.update(1)
+            # Text logging similar to pretraining script
+            if (batch_idx + 1) % args.log_interval == 0:
+                avg_loss = epoch_loss / max(1, num_batches)
+                print(
+                    f"Epoch [{epoch}/{args.epochs}] "
+                    f"Batch [{batch_idx + 1}/{len(train_loader)}] "
+                    f"Loss: {loss.item():.6f} (avg: {avg_loss:.6f})"
+                )
 
         avg_train_loss = epoch_loss / max(1, num_batches)
         writer.add_scalar('train/loss_epoch', avg_train_loss, epoch)
 
-        # ---- Validate (Dice) ----
+        # ---------- Validate (Dice) ----------
         val_dice = evaluate(model, val_loader, device)
         writer.add_scalar('val/dice', val_dice, epoch)
 
@@ -589,15 +641,21 @@ def train_and_evaluate(args):
             f"Train Loss: {avg_train_loss:.4f}, Val Dice: {val_dice:.4f}"
         )
 
-        # ---- Save best model & early stopping ----
+        # ---------- Save best model & handle early stopping ----------
         if val_dice > best_val_dice:
             best_val_dice = val_dice
             epochs_without_improvement = 0
             torch.save(model.state_dict(), best_path)
-            print(f"  -> New best model saved to {best_path} (Val Dice: {best_val_dice:.4f})")
+            print(
+                f"  -> New best model saved to {best_path} "
+                f"(Val Dice: {best_val_dice:.4f})"
+            )
         else:
             epochs_without_improvement += 1
-            print(f"  -> No improvement in Dice for {epochs_without_improvement} epoch(s).")
+            print(
+                f"  -> No improvement in Dice for "
+                f"{epochs_without_improvement} epoch(s)."
+            )
 
         if epochs_without_improvement >= args.patience:
             print(f"Early stopping triggered at epoch {epoch}.")
@@ -607,13 +665,16 @@ def train_and_evaluate(args):
     print("Training finished.")
 
     # -----------------------------
-    # Evaluate best_model on the Test set
+    # Final evaluation on test set
     # -----------------------------
     if best_path.exists():
         print(f"Loading best model from {best_path} for final test evaluation...")
         model.load_state_dict(torch.load(best_path, map_location=device))
     else:
-        print("Best model file not found, using last epoch model for test evaluation.")
+        print(
+            "Best model file not found, using last epoch model "
+            "for test evaluation."
+        )
 
     test_dice = evaluate(model, test_loader, device)
     print(f"Final Test Dice: {test_dice:.4f}")
@@ -625,28 +686,57 @@ def train_and_evaluate(args):
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Fine-tune UNet2D / UNet2D_scAG / UNet2D_NAC segmentation on TG3K "
-                    "with MIM-pretrained weights and 3-stage transforms."
+        description=(
+            "Fine-tune UNet2D / UNet2D_scAG / UNet2D_NAC on TG3K "
+            "with MIM-pretrained weights and 3-stage transforms."
+        )
     )
 
     # Paths
-    parser.add_argument("--images-dir", type=str, required=True,
-                        help="Directory containing images")
-    parser.add_argument("--masks-dir", type=str, required=True,
-                        help="Directory containing masks")
-    parser.add_argument("--split-json", type=str, default=None,
-                        help="Path to tg3k-trainval.json (recommended)")
-    parser.add_argument("--save-dir", type=str,
-                        default="./tg3k/checkpoints_finetune",
-                        help="Directory to save checkpoints")
-    parser.add_argument("--tensorboard-dir", type=str, default=None,
-                        help="Directory for TensorBoard logs (optional)")
+    parser.add_argument(
+        "--images-dir",
+        type=str,
+        required=True,
+        help="Directory containing input images."
+    )
+    parser.add_argument(
+        "--masks-dir",
+        type=str,
+        required=True,
+        help="Directory containing segmentation masks."
+    )
+    parser.add_argument(
+        "--split-json",
+        type=str,
+        default=None,
+        help="Path to tg3k-trainval.json (recommended)."
+    )
+    parser.add_argument(
+        "--save-dir",
+        type=str,
+        default="./tg3k/checkpoints_finetune",
+        help="Directory to save best checkpoints."
+    )
+    parser.add_argument(
+        "--tensorboard-dir",
+        type=str,
+        default=None,
+        help="Directory for TensorBoard logs (optional)."
+    )
 
     # Pretraining & resume
-    parser.add_argument("--init-from", type=str, default=None,
-                        help="Path to pretraining checkpoint (e.g., MIM mim_best.pth)")
-    parser.add_argument("--resume", type=str, default=None,
-                        help="Path to full model checkpoint to resume from")
+    parser.add_argument(
+        "--init-from",
+        type=str,
+        default=None,
+        help="Path to pretraining checkpoint (e.g., MIM mim_best.pth)."
+    )
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        help="Path to full model checkpoint to resume from."
+    )
 
     # Model hyperparameters (must match MIM pretraining)
     parser.add_argument(
@@ -654,39 +744,76 @@ def parse_args():
         type=str,
         default="unet",
         choices=["unet", "scag", "nac"],
-        help="Backbone type, must match MIM pretrain: unet / scag / nac",
+        help="Backbone type, must match MIM pretrain: unet / scag / nac."
     )
-    parser.add_argument("--base-channels", type=int, default=32,
-                        help="Base number of feature maps in UNet2D (match MIM pretrain)")
-    parser.add_argument("--no-bilinear", action="store_true",
-                        help="Use ConvTranspose instead of bilinear upsampling")
+    parser.add_argument(
+        "--base-channels",
+        type=int,
+        default=32,
+        help="Base number of feature maps in UNet2D (match MIM pretrain)."
+    )
+    parser.add_argument(
+        "--no-bilinear",
+        action="store_true",
+        help="Use ConvTranspose instead of bilinear upsampling."
+    )
 
     # Training hyperparameters
     parser.add_argument("--epochs", type=int, default=100)
-    parser.add_argument("--batch-size", type=int, default=4,
-                        help="Batch size (default 4 matches baseline)")
-    parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--weight-decay", type=float, default=1e-5,
-                        help="Weight decay for Adam, e.g. 1e-5")
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=4,
+        help="Batch size (default 4 matches baseline)."
+    )
+    parser.add_argument("--lr", type=float, default=1e-5)
+    parser.add_argument(
+        "--weight-decay",
+        type=float,
+        default=1e-5,
+        help="Weight decay for Adam, e.g. 1e-5."
+    )
     parser.add_argument("--workers", type=int, default=0)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--cpu", action="store_true", help="Force CPU usage")
+    parser.add_argument(
+        "--cpu",
+        action="store_true",
+        help="Force CPU even if CUDA is available."
+    )
+    parser.add_argument(
+        "--log-interval",
+        type=int,
+        default=50,
+        help="How many batches to wait before logging to stdout."
+    )
 
     # λ in BCE + Dice
-    parser.add_argument("--lambda-dice", type=float, default=0.2,
-                        help="Weight for Dice loss term in combined loss (BCE + λ*Dice)")
+    parser.add_argument(
+        "--lambda-dice",
+        type=float,
+        default=0.2,
+        help="Weight for Dice loss term in combined loss (BCE + λ * Dice)."
+    )
 
     # Early stopping
-    parser.add_argument("--patience", type=int, default=20,
-                        help="Early stopping patience based on validation Dice")
+    parser.add_argument(
+        "--patience",
+        type=int,
+        default=20,
+        help="Early stopping patience based on validation Dice."
+    )
 
     # Random split ratios when split_json is not provided
     parser.add_argument("--val-ratio", type=float, default=0.1)
     parser.add_argument("--test-ratio", type=float, default=0.1)
 
-    # Optional training subset size when using split_json (e.g., 500 images as in baseline)
-    parser.add_argument("--train-subset-size", type=int, default=0,
-                        help="If >0 and using split-json, subsample this many training images")
+    # Optional training subset size when using split_json
+    parser.add_argument(
+        "--train-subset-size",
+        type=int,
+        default=0,
+        help="If >0 and using split-json, subsample this many training images."
+    )
 
     args = parser.parse_args()
     return args
@@ -695,6 +822,7 @@ def parse_args():
 if __name__ == "__main__":
     args = parse_args()
     train_and_evaluate(args)
+
 
 
 # MIM
