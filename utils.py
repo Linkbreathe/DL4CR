@@ -75,6 +75,8 @@ def load_image_as_array(path: Union[str, Path]) -> np.ndarray:
     return load_grayscale_image(path)
 
 
+
+
 def get_image_paths(
     images_dir: Path,
     exts: Tuple[str, ...] = DEFAULT_EXTS,
@@ -352,4 +354,5 @@ def load_checkpoint_for_resume(
     start_epoch = max(start_epoch, 0)
     print(f"Resuming from checkpoint {ckpt_path}, epoch {start_epoch}")
     return start_epoch
+
 

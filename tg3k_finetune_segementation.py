@@ -849,3 +849,4 @@ if __name__ == "__main__":
 
 
 
+ # python tg3k_finetune_segementation.py --images-dir ./tg3k/tg3k_fbf/thyroid-image --masks-dir ./tg3k/tg3k_fbf/thyroid-mask --split-json ./tg3k/tg3k_fbf/tg3k-trainval.json --init-from ./tg3k/checkpoints_unet_mim_fbf/mim_best.pth --tensorboard-dir ./tg3k/runs/mim_unet_finetune_tg3k_fbf --save-dir ./tg3k/checkpoints_finetune_fbf/mim_unet --train-subset-size 500 --model-type unet
