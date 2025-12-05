@@ -1,10 +1,29 @@
 import torch
 
+# Example: loading a pretraining checkpoint (contains optimizer, args, etc.)
 # ckpt_path = "./tg3k/checkpoints_mim/mim_best.pth"
+# This checkpoint has keys:
 # dict_keys(['epoch', 'model_state_dict', 'optimizer_state_dict', 'args'])
 
+# Load a finetuned UNet checkpoint (raw state_dict only)
 ckpt_path = "./tg3k/checkpoints_finetune/mim/best_model.pth"
+
+# Load checkpoint to CPU
 ckpt = torch.load(ckpt_path, map_location="cpu")
-# odict_keys(['inc.double_conv.0.weight', 'inc.double_conv.1.weight', 'inc.double_conv.1.bias', 'inc.double_conv.1.running_mean', 'inc.double_conv.1.running_var', 'inc.double_conv.1.num_batches_tracked', 'inc.double_conv.3.weight', 'inc.double_conv.4.weight', 'inc.double_conv.4.bias', 'inc.double_conv.4.running_mean', 'inc.double_conv.4.running_var', 'inc.double_conv.4.num_batches_tracked', 'down1.maxpool_conv.1.double_conv.0.weight', 'down1.maxpool_conv.1.double_conv.1.weight', 'down1.maxpool_conv.1.double_conv.1.bias', 'down1.maxpool_conv.1.double_conv.1.running_mean', 'down1.maxpool_conv.1.double_conv.1.running_var', 'down1.maxpool_conv.1.double_conv.1.num_batches_tracked', 'down1.maxpool_conv.1.double_conv.3.weight', 'down1.maxpool_conv.1.double_conv.4.weight', 'down1.maxpool_conv.1.double_conv.4.bias', 'down1.maxpool_conv.1.double_conv.4.running_mean', 'down1.maxpool_conv.1.double_conv.4.running_var', 'down1.maxpool_conv.1.double_conv.4.num_batches_tracked', 'down2.maxpool_conv.1.double_conv.0.weight', 'down2.maxpool_conv.1.double_conv.1.weight', 'down2.maxpool_conv.1.double_conv.1.bias', 'down2.maxpool_conv.1.double_conv.1.running_mean', 'down2.maxpool_conv.1.double_conv.1.running_var', 'down2.maxpool_conv.1.double_conv.1.num_batches_tracked', 'down2.maxpool_conv.1.double_conv.3.weight', 'down2.maxpool_conv.1.double_conv.4.weight', 'down2.maxpool_conv.1.double_conv.4.bias', 'down2.maxpool_conv.1.double_conv.4.running_mean', 'down2.maxpool_conv.1.double_conv.4.running_var', 'down2.maxpool_conv.1.double_conv.4.num_batches_tracked', 'down3.maxpool_conv.1.double_conv.0.weight', 'down3.maxpool_conv.1.double_conv.1.weight', 'down3.maxpool_conv.1.double_conv.1.bias', 'down3.maxpool_conv.1.double_conv.1.running_mean', 'down3.maxpool_conv.1.double_conv.1.running_var', 'down3.maxpool_conv.1.double_conv.1.num_batches_tracked', 'down3.maxpool_conv.1.double_conv.3.weight', 'down3.maxpool_conv.1.double_conv.4.weight', 'down3.maxpool_conv.1.double_conv.4.bias', 'down3.maxpool_conv.1.double_conv.4.running_mean', 'down3.maxpool_conv.1.double_conv.4.running_var', 'down3.maxpool_conv.1.double_conv.4.num_batches_tracked', 'down4.maxpool_conv.1.double_conv.0.weight', 'down4.maxpool_conv.1.double_conv.1.weight', 'down4.maxpool_conv.1.double_conv.1.bias', 'down4.maxpool_conv.1.double_conv.1.running_mean', 'down4.maxpool_conv.1.double_conv.1.running_var', 'down4.maxpool_conv.1.double_conv.1.num_batches_tracked', 'down4.maxpool_conv.1.double_conv.3.weight', 'down4.maxpool_conv.1.double_conv.4.weight', 'down4.maxpool_conv.1.double_conv.4.bias', 'down4.maxpool_conv.1.double_conv.4.running_mean', 'down4.maxpool_conv.1.double_conv.4.running_var', 'down4.maxpool_conv.1.double_conv.4.num_batches_tracked', 'up1.conv.double_conv.0.weight', 'up1.conv.double_conv.1.weight', 'up1.conv.double_conv.1.bias', 'up1.conv.double_conv.1.running_mean', 'up1.conv.double_conv.1.running_var', 'up1.conv.double_conv.1.num_batches_tracked', 'up1.conv.double_conv.3.weight', 'up1.conv.double_conv.4.weight', 'up1.conv.double_conv.4.bias', 'up1.conv.double_conv.4.running_mean', 'up1.conv.double_conv.4.running_var', 'up1.conv.double_conv.4.num_batches_tracked', 'up2.conv.double_conv.0.weight', 'up2.conv.double_conv.1.weight', 'up2.conv.double_conv.1.bias', 'up2.conv.double_conv.1.running_mean', 'up2.conv.double_conv.1.running_var', 'up2.conv.double_conv.1.num_batches_tracked', 'up2.conv.double_conv.3.weight', 'up2.conv.double_conv.4.weight', 'up2.conv.double_conv.4.bias', 'up2.conv.double_conv.4.running_mean', 'up2.conv.double_conv.4.running_var', 'up2.conv.double_conv.4.num_batches_tracked', 'up3.conv.double_conv.0.weight', 'up3.conv.double_conv.1.weight', 'up3.conv.double_conv.1.bias', 'up3.conv.double_conv.1.running_mean', 'up3.conv.double_conv.1.running_var', 'up3.conv.double_conv.1.num_batches_tracked', 'up3.conv.double_conv.3.weight', 'up3.conv.double_conv.4.weight', 'up3.conv.double_conv.4.bias', 'up3.conv.double_conv.4.running_mean', 'up3.conv.double_conv.4.running_var', 'up3.conv.double_conv.4.num_batches_tracked', 'up4.conv.double_conv.0.weight', 'up4.conv.double_conv.1.weight', 'up4.conv.double_conv.1.bias', 'up4.conv.double_conv.1.running_mean', 'up4.conv.double_conv.1.running_var', 'up4.conv.double_conv.1.num_batches_tracked', 'up4.conv.double_conv.3.weight', 'up4.conv.double_conv.4.weight', 'up4.conv.double_conv.4.bias', 'up4.conv.double_conv.4.running_mean', 'up4.conv.double_conv.4.running_var', 'up4.conv.double_conv.4.num_batches_tracked', 'outc.conv.weight', 'outc.conv.bias'])
-print(type(ckpt))
-print(ckpt.keys())  # 如果是 dict，会打印所有顶层 key
+
+# For a finetuned UNet, ckpt is usually a pure state_dict:
+# odict_keys([
+#   'inc.double_conv.0.weight', 'inc.double_conv.1.weight', 'inc.double_conv.1.bias',
+#   'inc.double_conv.1.running_mean', 'inc.double_conv.1.running_var',
+#   'inc.double_conv.1.num_batches_tracked',
+#   ...
+#   'down1.maxpool_conv.1.double_conv.0.weight',
+#   ...
+#   'up4.conv.double_conv.4.running_var',
+#   'up4.conv.double_conv.4.num_batches_tracked',
+#   'outc.conv.weight', 'outc.conv.bias'
+# ])
+# These keys directly correspond to the UNet2D layer names.
+
+print(type(ckpt))     # Should print <class 'collections.OrderedDict'> for a raw state_dict
+print(ckpt.keys())    # Prints all top-level parameter names in the checkpoint
